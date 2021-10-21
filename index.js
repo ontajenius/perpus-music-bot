@@ -45,6 +45,11 @@ client.on("interactionCreate", async (interaction) => {
       metadata: {
         channel: interaction.channel,
       },
+      ytdlOptions: {
+        filter: "audioonly",
+        highWaterMark: 1 << 25,
+        dlChunkSize: 0,
+      },
     });
 
     // verify vc connection
