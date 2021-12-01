@@ -47,6 +47,7 @@ client.on("interactionCreate", async (interaction) => {
       },
       ytdlOptions: {
         filter: "audioonly",
+        quality: "highestaudio",
         highWaterMark: 1 << 25,
         dlChunkSize: 0,
       },
