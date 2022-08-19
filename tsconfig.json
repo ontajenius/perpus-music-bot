@@ -1,0 +1,14 @@
+{
+    "extends": "@tsconfig/node16/tsconfig.json",
+    "include": ["src/*"],
+    "compilerOptions": {
+        "sourceMap": true,
+        "removeComments": true,
+        "outDir": "./dist",
+        "incremental": true,
+        "skipLibCheck": true,
+        "declaration": true,
+        "emitDecoratorMetadata": true,
+        "experimentalDecorators": true,
+    }
+}
