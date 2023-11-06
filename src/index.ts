@@ -1,4 +1,4 @@
-import { Player, Queue } from "discord-player";
+import { GuildQueue, Player } from "discord-player";
 import { Client, CommandInteraction, GatewayIntentBits, Guild, GuildMember, Interaction, VoiceBasedChannel } from "discord.js";
 import "dotenv/config";
 import { pino } from "pino";
@@ -17,34 +17,44 @@ client.login(process.env.DISCORD_TOKEN);
 // Create a new Player (you don't need any API Key)
 const player = new Player(client);
 
-player.on("trackStart", async (queue, track) => {
+player.extractors.loadDefault((ext) => ext === "YouTubeExtractor");
+
+player.events.on("playerStart", async (queue, track) => {
   if (!queue.metadata) throw "metadata not defined";
   const metadata = queue.metadata as Interaction;
   await metadata.channel?.send(`Now playing **${track.title}**!`);
-  logger.info({ track }, "trackStart");
+  logger.info({ track }, "playerStart");
 });
 
-player.on("trackAdd", (queue, track) => logger.debug({ track }, "trackAdd"));
+player.events.on("audioTrackAdd", (queue, track) => logger.debug({ track }, "audioTrackAdd"));
 
-player.on("trackEnd", (queue, track) => logger.debug({ track }, "trackEnd"));
+player.events.on("playerFinish", (queue, track) => logger.debug({ track }, "playerFinish"));
 
-player.on("connectionCreate", (queue, stream) => logger.debug({ stream }, "connectionCreate"));
+player.events.on("connection", (queue) => logger.debug("connection"));
 
-player.on("connectionError", (queue, err) => logger.error({ err }, "connectionError"));
+player.events.on("connectionDestroyed", (queue) => logger.error("connectionDestroyed"));
 
-player.on("debug", (queue, data) => logger.debug({ data }, "debug"));
+player.events.on("debug", (queue, data) => logger.debug({ debug: data }));
 
-player.on("queueEnd", (queue) => logger.debug("queueEnd"));
+player.events.on("emptyQueue", (queue) => logger.debug("emptyQueue"));
 
-player.on("channelEmpty", (queue) => logger.debug("channelEmpty"));
+player.events.on("emptyChannel", (queue) => logger.debug("emptyChannel"));
 
-player.on("tracksAdd", (queue) => logger.debug("tracksAdd"));
+player.events.on("audioTracksAdd", (queue) => logger.debug("audioTracksAdd"));
+
+player.events.on("playerSkip", (queue, track, reason, description) =>
+  logger.debug({ queue: queue.tracks.toArray(), track, reason, description }, "playerSkip")
+);
 
 client.once("ready", () => {
   logger.info(`Logged in as ${client.user?.tag}`);
 });
 
-player.on("error", (queue, error) => {
+player.on("error", (error) => {
+  logger.error({ message: error.message, detail: error.name, stack: error.stack });
+});
+
+player.events.on("error", (queue, error) => {
   if (!queue.metadata) throw "metadata not defined";
   const metadata = queue.metadata as Interaction;
   metadata.channel?.send(`Adu maap error nih, antara lagunya error ato yang bikin emang bloon`);
@@ -69,7 +79,7 @@ client.on("interactionCreate", async (interaction) => {
     const query = interaction.options.get("judul")?.value;
     if (typeof query !== "string") throw "Gagal nih process judulnya";
 
-    const queue = player.createQueue(guild, {
+    const queue = player.queues.create(guild, {
       metadata: {
         channel: interaction.channel,
       },
@@ -86,7 +96,7 @@ client.on("interactionCreate", async (interaction) => {
     try {
       if (!queue.connection) await queue.connect(voiceChannel);
     } catch {
-      queue.destroy();
+      queue.delete();
       await interaction.reply({
         content: "Gabisa masuk voice channel nih",
         ephemeral: true,
@@ -104,8 +114,8 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     await queue.addTrack(track);
-    logger.debug({ isplaying: queue.playing, isrunning: queue.playing === false });
-    if (queue.playing === false) await queue.play();
+    logger.debug({ isplaying: queue.isPlaying(), isrunning: queue.isPlaying() === false });
+    if (queue.isPlaying() === false) await queue.play(track);
 
     await interaction.followUp({
       content: `Ketemu ni **${track}**`,
@@ -124,7 +134,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    player.deleteQueue(guild);
+    player.queues.delete(guild);
 
     await interaction.reply({
       content: "Udah distop ya sayang",
@@ -134,39 +144,43 @@ client.on("interactionCreate", async (interaction) => {
 
   // skip music
   if (interaction.commandName === "skip") {
-    let queue: Queue | undefined;
+    let queue: GuildQueue | null;
     try {
       queue = await getGuildQueue(interaction);
     } catch (error) {
       logger.error((error as Error).message);
       return;
     }
-    if (!queue || !queue.playing) {
+    if (!queue || !queue.isPlaying()) {
       await interaction.reply({
         content: "Lagi gada lagu kamu skip gimana si",
       });
       return;
     }
 
-    const currentTrack = queue.current;
-    const success = queue.skip();
+    const currentTrack = queue.currentTrack;
+    const success = await queue.node.skip();
     await interaction.reply({
       content: success ? `Lagu **${currentTrack}** aku skip ya` : "❌ | Ada ngaco ni, bloon yang buat",
     });
+
+    console.log({ queue: queue.tracks.toArray() });
     return;
   }
 
   // show queue
   if (interaction.commandName == "queue") {
     const guild = validateGuild(interaction);
-    const queue = player.getQueue(guild);
-    if (!queue || !queue.playing) {
+    const queue = player.queues.get(guild);
+    if (!queue || !queue.isPlaying()) {
       await interaction.reply({ content: "Isi playlist kosong ni" });
       return;
     }
 
-    const currentTrack = queue.current;
-    const tracks = queue.tracks.slice(0, 10).map((m, i) => {
+    console.log({ queue: queue.tracks });
+
+    const currentTrack = queue.tracks.toArray();
+    const tracks = currentTrack.slice(0, 10).map((m, i) => {
       return `${i + 1}. **${m.title}** ([link](${m.url}))`;
     });
 
@@ -175,16 +189,16 @@ client.on("interactionCreate", async (interaction) => {
         {
           title: "Isi playlist",
           description: `${tracks.join("\n")}${
-            queue.tracks.length > tracks.length
+            currentTrack.length > tracks.length
               ? `\n...${
-                  queue.tracks.length - tracks.length === 1
-                    ? `${queue.tracks.length - tracks.length} more track`
-                    : `${queue.tracks.length - tracks.length} more tracks`
+                  currentTrack.length - tracks.length === 1
+                    ? `${currentTrack.length - tracks.length} more track`
+                    : `${currentTrack.length - tracks.length} more tracks`
                 }`
               : ""
           }`,
           color: 0xff0000,
-          fields: [{ name: "Now Playing", value: `🎶 | **${currentTrack.title}** ([link](${currentTrack.url}))` }],
+          fields: [{ name: "Now Playing", value: `🎶 | **${currentTrack}** ([link](${currentTrack}))` }],
         },
       ],
     });
@@ -194,14 +208,14 @@ client.on("interactionCreate", async (interaction) => {
   // pause music
   if (interaction.commandName === "pause") {
     const queue = await getGuildQueue(interaction);
-    if (!queue || !queue.playing) {
+    if (!queue || !queue.isPlaying()) {
       await interaction.reply({
         content: "Lagi gada lagu kamu pause suka aneh",
       });
       return;
     }
-    const currentTrack = queue.current;
-    const success = queue.setPaused(true);
+    const currentTrack = queue.currentTrack;
+    const success = queue.node.pause();
     await interaction.reply({
       content: success ? `Lagu **${currentTrack}** aku pause ya` : "❌ | Ada ngaco ni, bloon yang buat",
     });
@@ -211,14 +225,14 @@ client.on("interactionCreate", async (interaction) => {
   // resume music
   if (interaction.commandName === "resume") {
     const queue = await getGuildQueue(interaction);
-    if (!queue || !queue.playing) {
+    if (!queue || !queue.isPlaying()) {
       await interaction.reply({
         content: "Lagi gada lagu kamu lanjut suka aneh",
       });
       return;
     }
-    const currentTrack = queue.current;
-    const success = queue.setPaused(false);
+    const currentTrack = queue.currentTrack;
+    const success = queue.node.resume();
     await interaction.reply({
       content: success ? `Lagu **${currentTrack}** aku lanjut ya` : "❌ | Ada ngaco ni, bloon yang buat",
     });
@@ -228,16 +242,16 @@ client.on("interactionCreate", async (interaction) => {
   // shuffle music
   if (interaction.commandName === "shuffle") {
     const queue = await getGuildQueue(interaction);
-    if (!queue || !queue.playing) {
+    if (!queue || !queue.isPlaying()) {
       await interaction.reply({
         content: "Lagi gada lagu kamu mau shuffle ga sekalian parkour bang?",
       });
       return;
     }
 
-    const success = queue.shuffle();
+    queue.tracks.shuffle();
     await interaction.reply({
-      content: success ? `Playlist aku shuffle ya` : "❌ | Ada ngaco ni, bloon yang buat",
+      content: `Playlist aku shuffle ya`,
     });
     return;
   }
@@ -270,8 +284,8 @@ function validateGuild(interaction: CommandInteraction): Guild {
   return guild;
 }
 
-async function getGuildQueue(interaction: CommandInteraction): Promise<Queue | undefined> {
+async function getGuildQueue(interaction: CommandInteraction): Promise<GuildQueue | null> {
   const guild = validateGuild(interaction);
   await checkVoiceChannelValidity(interaction);
-  return player.getQueue(guild);
+  return player.queues.get(guild);
 }
